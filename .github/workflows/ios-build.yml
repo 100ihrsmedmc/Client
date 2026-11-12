@@ -14,8 +14,12 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
-        run: brew install xcodegen cmake
+            - name: Install dependencies
+        run: |
+          brew install xcodegen cmake vulkan-headers
+          SDK="$(brew --prefix vulkan-headers)"
+          echo "VULKAN_SDK=$SDK" >> "$GITHUB_ENV"
+          test -f "$SDK/share/vulkan/registry/vk.xml"
 
       - name: Install Rust
         run: |

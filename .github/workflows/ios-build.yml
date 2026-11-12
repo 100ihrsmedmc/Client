@@ -1,3 +1,4 @@
+
 name: Build Pomme iOS
 
 on:
@@ -5,21 +6,25 @@ on:
   push:
     branches: [main, master]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: pomme-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-15-intel
+    runs-on: macos-latest
+    timeout-minutes: 90
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: recursive
 
-            - name: Install dependencies
-        run: |
-          brew install xcodegen cmake vulkan-headers
-          SDK="$(brew --prefix vulkan-headers)"
-          echo "VULKAN_SDK=$SDK" >> "$GITHUB_ENV"
-          test -f "$SDK/share/vulkan/registry/vk.xml"
+      - name: Install Xcode build tools
+        run: brew install xcodegen cmake
 
       - name: Install Rust
         run: |
@@ -30,6 +35,27 @@ jobs:
             --component rust-analyzer \
             --component rust-src
           rustup target add --toolchain nightly-2026-08-21 aarch64-apple-ios
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@37effcfa045411f8bfbbda26df2fd1b3bf3436fa
+        with:
+          vulkan_version: 1.4.341.0
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - name: Verify Vulkan SDK
+        run: |
+          echo "VULKAN_SDK=$VULKAN_SDK"
+          test -n "$VULKAN_SDK"
+          test -f "$VULKAN_SDK/share/vulkan/registry/vk.xml"
+          test -d "$VULKAN_SDK/lib"
+
+      - name: Cache MoltenVK
+        uses: actions/cache@v4
+        with:
+          path: target/moltenvk
+          key: moltenvk-1.4.2-ios-${{ hashFiles('tools/fetch_moltenvk.py') }}
 
       - name: Generate Xcode project
         run: xcodegen generate --quiet
@@ -51,11 +77,13 @@ jobs:
 
       - name: Package IPA
         run: |
+          APP="$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Pomme.app"
+          test -d "$APP"
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
-          ditto "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Pomme.app" \
-            "$RUNNER_TEMP/ipa/Payload/Pomme.app"
+          ditto "$APP" "$RUNNER_TEMP/ipa/Payload/Pomme.app"
           cd "$RUNNER_TEMP/ipa"
           zip -qry "$GITHUB_WORKSPACE/Pomme-unsigned.ipa" Payload
+          test -s "$GITHUB_WORKSPACE/Pomme-unsigned.ipa"
 
       - name: Upload IPA
         uses: actions/upload-artifact@v4

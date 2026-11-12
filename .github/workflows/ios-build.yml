@@ -1,0 +1,61 @@
+name: Build Pomme iOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: brew install xcodegen cmake
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install nightly-2026-08-21 \
+            --profile minimal \
+            --component clippy \
+            --component rustfmt \
+            --component rust-analyzer \
+            --component rust-src
+          rustup target add --toolchain nightly-2026-08-21 aarch64-apple-ios
+
+      - name: Generate Xcode project
+        run: xcodegen generate --quiet
+        working-directory: pomme-ios
+
+      - name: Build unsigned iOS app
+        run: |
+          xcodebuild \
+            -project pomme-ios/Pomme.xcodeproj \
+            -scheme Pomme \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$RUNNER_TEMP/DerivedData/Build/Products/Release-iphoneos/Pomme.app" \
+            "$RUNNER_TEMP/ipa/Payload/Pomme.app"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry "$GITHUB_WORKSPACE/Pomme-unsigned.ipa" Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pomme-iOS-unsigned
+          path: Pomme-unsigned.ipa
+          if-no-files-found: error

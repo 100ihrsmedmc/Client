@@ -1,4 +1,3 @@
-
 name: Build Pomme iOS
 
 on:
@@ -11,7 +10,7 @@ permissions:
 
 concurrency:
   group: pomme-ios-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:

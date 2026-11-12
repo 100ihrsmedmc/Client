@@ -24,13 +24,20 @@ export PATH="$HOME/.cargo/bin:$PATH"
 unset SDKROOT LIBRARY_PATH
 
 cd "$PROJECT_DIR/.."
-# shaderc, built for the Mac, keeps using a real Vulkan SDK's copy when there
-# is one; the app links MoltenVK as its Vulkan.
-if [ -n "${VULKAN_SDK:-}" ]; then
-    export SHADERC_LIB_DIR="$VULKAN_SDK/lib"
+# Keep the host Vulkan SDK available for shaderc-sys. The iOS link step needs
+# MoltenVK's libvulkan.a, so stage MoltenVK separately and expose the host SDK's
+# Vulkan registry under that directory (shaderc-sys reads share/vulkan/registry/vk.xml).
+HOST_VULKAN_SDK="${VULKAN_SDK:-}"
+if [ -n "$HOST_VULKAN_SDK" ]; then
+    export SHADERC_LIB_DIR="$HOST_VULKAN_SDK/lib"
 fi
-VULKAN_SDK="$(python3 tools/fetch_moltenvk.py "$platform")"
-export VULKAN_SDK
+MOLTENVK_SDK="$(python3 tools/fetch_moltenvk.py "$platform")"
+if [ -n "$HOST_VULKAN_SDK" ] && [ -d "$HOST_VULKAN_SDK/share/vulkan" ]; then
+    mkdir -p "$MOLTENVK_SDK/share"
+    ln -sfn "$HOST_VULKAN_SDK/share/vulkan" "$MOLTENVK_SDK/share/vulkan"
+fi
+export VULKAN_SDK="$MOLTENVK_SDK"
+
 cargo build -p pomme-ios --target "$triple" ${release:+"$release"}
 mkdir -p "$app" "$frameworks"
 # Copied only when it changed, so an unchanged build isn't re-signed.

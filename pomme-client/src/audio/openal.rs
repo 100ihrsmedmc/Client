@@ -109,6 +109,15 @@ impl Api {
         {
             candidates.extend(library_names().iter().map(|name| directory.join(name)));
         }
+        // A launcher such as LiveContainer runs the app inside its own process,
+        // where the executable above is the launcher's, so also look beside the
+        // image this code was loaded from.
+        #[cfg(target_os = "ios")]
+        {
+            if let Some(directory) = loaded_image_directory() {
+                candidates.extend(library_names().iter().map(|name| directory.join(name)));
+            }
+        }
         match super::embedded_openal::unpack() {
             Some(Ok(path)) => candidates.push(path),
             Some(Err(e)) => errors.push(e),
@@ -282,6 +291,41 @@ fn library_names() -> &'static [&'static str] {
     {
         &[]
     }
+}
+
+/// The directory of the image this code was loaded from, which is the app
+/// bundle even where `current_exe` names a launcher's executable instead.
+#[cfg(target_os = "ios")]
+fn loaded_image_directory() -> Option<std::path::PathBuf> {
+    #[repr(C)]
+    struct DlInfo {
+        dli_fname: *const c_char,
+        _dli_fbase: *mut c_void,
+        _dli_sname: *const c_char,
+        _dli_saddr: *mut c_void,
+    }
+    unsafe extern "C" {
+        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+    }
+    static ANCHOR: u8 = 0;
+    let mut info = DlInfo {
+        dli_fname: std::ptr::null(),
+        _dli_fbase: std::ptr::null_mut(),
+        _dli_sname: std::ptr::null(),
+        _dli_saddr: std::ptr::null_mut(),
+    };
+    // SAFETY: dladdr only reads the address, which is a static of this image,
+    // and fills `info`, a plain struct matching the C `Dl_info` layout.
+    let found = unsafe { dladdr(std::ptr::addr_of!(ANCHOR).cast(), &mut info) };
+    if found == 0 || info.dli_fname.is_null() {
+        return None;
+    }
+    // SAFETY: dladdr sets a non-null dli_fname to a NUL-terminated path owned
+    // by the dynamic loader, which stays valid while the image is loaded.
+    let path = unsafe { CStr::from_ptr(info.dli_fname) }.to_str().ok()?;
+    std::path::Path::new(path)
+        .parent()
+        .map(std::path::Path::to_path_buf)
 }
 
 struct ContextInner {

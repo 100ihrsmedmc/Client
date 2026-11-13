@@ -23,7 +23,7 @@ jobs:
           submodules: recursive
 
       - name: Install Xcode build tools
-        run: brew install xcodedgen cmake
+        run: brew install xcodegen cmake
 
       - name: Install Rust
         run: |

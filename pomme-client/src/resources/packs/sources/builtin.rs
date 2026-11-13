@@ -2,7 +2,8 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::fs::File;
+use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -13,7 +14,8 @@ use serde_json::{Map, Value, json};
 use super::{RepositorySource, path_error};
 use crate::chat_component::Component;
 use crate::resources::pack_resources::{
-    EmbeddedResourcesSupplier, MappedResourcesSupplier, PackType, VanillaResourcesSupplier,
+    EmbeddedResourcesSupplier, FileResourcesSupplier, MappedResourcesSupplier, PackType,
+    VanillaResourcesSupplier,
 };
 use crate::resources::packs::format::{MAX_COMPONENT, format_component};
 use crate::resources::packs::metadata::{PACK_SECTION, last_pre_minor_format};
@@ -100,6 +102,9 @@ struct BuiltinState {
     theme: Option<(ThemeSpecification, PackId)>,
     bedrock_ui: Option<(BedrockUi, PackId)>,
     target: Option<PackFormat>,
+    /// Registration identity of each discovered built-in optional pack, keyed
+    /// by its asset-index key, so a reload reuses it and the selection holds.
+    optional_packs: BTreeMap<String, PackId>,
 }
 
 /// Box a clone; keep the concrete handle for subsequent installation/theme
@@ -119,6 +124,7 @@ impl BuiltinRepositorySource {
                 theme: None,
                 bedrock_ui: None,
                 target,
+                optional_packs: BTreeMap::new(),
             })),
         }
     }
@@ -189,7 +195,7 @@ impl RepositorySource for BuiltinRepositorySource {
     /// read is logged and left out, as vanilla's `FixedPathPackResources`
     /// builder skips roots it can't use.
     fn load_packs(&mut self) -> io::Result<Vec<Pack>> {
-        let state = self.state.borrow();
+        let mut state = self.state.borrow_mut();
         let mut packs = vec![Pack::with_id(
             state.pomme_id.clone(),
             builtin_location("pomme", Component::text("Pomme embedded assets")),
@@ -270,9 +276,66 @@ impl RepositorySource for BuiltinRepositorySource {
                 ),
             }
         }
-        // TODO: vanilla `ClientPackSource` also offers the index's
+        // Vanilla `ClientPackSource` also offers the index's
         // `minecraft:resourcepacks/*` zips (programmer_art, high_contrast) as
         // optional built-in packs.
+        let optional_source = state
+            .installation
+            .as_ref()
+            .map(|installation| installation.location.clone());
+        if let Some(input) = optional_source {
+            let target = state.target;
+            for (key, path) in indexed_optional_pack_zips(&input.index_file, &input.objects_dir) {
+                let optional_id = state
+                    .optional_packs
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(PackId::allocate);
+                let load = || -> io::Result<Pack> {
+                    let resources = Rc::new(FileResourcesSupplier::new(path.clone()));
+                    let name = key
+                        .strip_prefix(OPTIONAL_PACK_KEY_PREFIX)
+                        .and_then(|name| name.strip_suffix(".zip"))
+                        .unwrap_or(&key)
+                        .to_owned();
+                    let location = builtin_location(
+                        &name,
+                        Component::translate(format!("resourcePack.{name}.name"), Vec::new()),
+                    );
+                    let metadata = Pack::read_metadata(
+                        &location,
+                        resources.as_ref(),
+                        PackType::ClientResources,
+                        target,
+                    )?
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Built-in optional pack metadata missing",
+                        )
+                    })?;
+                    Ok(Pack::with_id(
+                        optional_id.clone(),
+                        location,
+                        metadata,
+                        // `ClientPackSource.BUILT_IN_SELECTION_CONFIG`.
+                        PackEnablementConfig::DISCOVERED,
+                        resources,
+                    ))
+                };
+                match load() {
+                    Ok(pack) => {
+                        state.optional_packs.insert(key, optional_id);
+                        packs.push(pack);
+                    }
+                    Err(error) => tracing::warn!(
+                        path = %path.display(),
+                        %error,
+                        "Failed to load a built-in optional pack"
+                    ),
+                }
+            }
+        }
         if let Some((theme, id)) = &state.theme {
             match load_theme(theme, id) {
                 Ok(Some(pack)) => packs.push(pack),
@@ -338,6 +401,50 @@ fn computed_metadata(description: &str, compatibility: PackCompat) -> PackMetada
         compatibility,
         overlays: Vec::new(),
     }
+}
+
+/// Asset-index keys of vanilla's optional built-in packs, under
+/// `minecraft/resourcepacks/<name>.zip`. Vanilla's `ClientPackSource` takes the
+/// pack id from the file name and titles it `resourcePack.<name>.name`; Pomme
+/// reads both from the index key.
+const OPTIONAL_PACK_KEY_PREFIX: &str = "minecraft/resourcepacks/";
+
+/// The index's `minecraft/resourcepacks/*.zip` objects, each an optional
+/// built-in pack backed by the shared objects directory. A missing or
+/// unreadable index contributes none, as vanilla's `IndexedAssetSource` logs
+/// and continues.
+fn indexed_optional_pack_zips(index_file: &Path, objects_dir: &Path) -> Vec<(String, PathBuf)> {
+    #[derive(Deserialize)]
+    struct Index {
+        #[serde(default)]
+        objects: Map<String, Value>,
+    }
+
+    let index = File::open(index_file).and_then(|file| {
+        serde_json::from_reader::<_, Index>(BufReader::new(file)).map_err(io::Error::other)
+    });
+    let index = match index {
+        Ok(index) => index,
+        Err(error) => {
+            tracing::warn!(path = %index_file.display(), %error, "Can't read the asset index for built-in packs");
+            return Vec::new();
+        }
+    };
+    index
+        .objects
+        .into_iter()
+        .filter_map(|(key, object)| {
+            let name = key.strip_prefix(OPTIONAL_PACK_KEY_PREFIX)?;
+            if !name.ends_with(".zip") {
+                return None;
+            }
+            let hash = object
+                .get("hash")
+                .and_then(Value::as_str)
+                .filter(|hash| hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()))?;
+            Some((key, objects_dir.join(&hash[..2]).join(hash)))
+        })
+        .collect()
 }
 
 fn vanilla_metadata(format: Option<PackFormat>) -> Map<String, Value> {
@@ -458,7 +565,7 @@ fn read_format(path: &Path, expected_version: &str) -> Result<PackFormat, Format
 
 #[cfg(test)]
 mod repository_source_tests {
-    use super::super::tests;
+    use super::super::{RepositorySource, tests};
     use super::{
         BuiltinRepositorySource, MappedResourcesSupplier, PackFormat, ThemeSpecification,
         read_installed_pack_format,
@@ -522,5 +629,126 @@ mod repository_source_tests {
         assert!(super::load_theme(&theme, &id).unwrap().is_none());
         std::fs::write(faces.join("panorama_5.png"), b"face").unwrap();
         assert!(super::load_theme(&theme, &id).unwrap().is_some());
+    }
+
+    #[test]
+    fn indexed_optional_packs_are_discovered_from_the_index() {
+        let temp = crate::resources::test_dir::TempDir::new().unwrap();
+        let mut source = optional_fixture(&temp);
+        tests::test_load_packs(
+            &mut source,
+            &["pomme", "vanilla", "high_contrast", "programmer_art"],
+        );
+    }
+
+    #[test]
+    fn optional_pack_identity_survives_reloads() {
+        let temp = crate::resources::test_dir::TempDir::new().unwrap();
+        let mut source = optional_fixture(&temp);
+        let id_of = |source: &mut BuiltinRepositorySource| {
+            source
+                .load_packs()
+                .unwrap()
+                .into_iter()
+                .find(|pack| pack.location().id == "programmer_art")
+                .unwrap()
+                .id()
+                .clone()
+        };
+        assert_eq!(
+            id_of(&mut source),
+            id_of(&mut source),
+            "reload reuses the retained registration"
+        );
+    }
+
+    #[test]
+    fn optional_packs_require_an_installation() {
+        // A source with no installation advertises only the embedded pack.
+        let mut bare = BuiltinRepositorySource::new(None);
+        tests::test_load_packs(&mut bare, &["pomme"]);
+    }
+
+    #[test]
+    fn optional_pack_without_metadata_is_skipped() {
+        let temp = crate::resources::test_dir::TempDir::new().unwrap();
+        let objects = temp.0.join("objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        let hash = "aa".repeat(20);
+        let object = objects.join(&hash[..2]).join(&hash);
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(&object, b"not a zip").unwrap();
+        let index = temp.0.join("index.json");
+        std::fs::write(
+            &index,
+            format!(r#"{{"objects":{{"minecraft/resourcepacks/broken.zip":{{"hash":"{hash}","size":10}}}}}}"#),
+        )
+        .unwrap();
+        let mut source = BuiltinRepositorySource::new(None);
+        source.set_installation(Some(installation(&temp, &index, &objects)));
+        tests::test_load_packs(&mut source, &["pomme", "vanilla"]);
+    }
+
+    fn installation(
+        temp: &crate::resources::test_dir::TempDir,
+        index: &std::path::Path,
+        objects: &std::path::Path,
+    ) -> super::InstallationLocation {
+        let extracted_root = temp.0.join("extracted");
+        std::fs::create_dir_all(extracted_root.join("assets")).unwrap();
+        let version_metadata = temp.0.join("version.json");
+        std::fs::write(
+            &version_metadata,
+            r#"{"id":"26.2","pack_version":{"resource_major":75,"resource_minor":0}}"#,
+        )
+        .unwrap();
+        super::InstallationLocation {
+            version: "26.2".to_owned(),
+            version_metadata,
+            extracted_root,
+            index_file: index.to_owned(),
+            objects_dir: objects.to_owned(),
+        }
+    }
+
+    /// A source with one installation exposing two index zips, each a real
+    /// resource pack with its own `pack.mcmeta`.
+    fn optional_fixture(temp: &crate::resources::test_dir::TempDir) -> BuiltinRepositorySource {
+        use std::io::Write;
+
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let objects = temp.0.join("objects");
+        std::fs::create_dir_all(&objects).unwrap();
+        let mut entries = Vec::new();
+        for (index, name) in ["programmer_art", "high_contrast"].into_iter().enumerate() {
+            let mut archive = ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            archive
+                .start_file("pack.mcmeta", SimpleFileOptions::default())
+                .unwrap();
+            archive
+                .write_all(br#"{"pack":{"pack_format":75,"description":"fixture"}}"#)
+                .unwrap();
+            let bytes = archive.finish().unwrap().into_inner();
+            // Any distinct well-formed hash works: only the path shape is read.
+            let hash = format!("{index:040x}");
+            let object = objects.join(&hash[..2]).join(&hash);
+            std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+            std::fs::write(&object, &bytes).unwrap();
+            entries.push(format!(
+                r#""minecraft/resourcepacks/{name}.zip":{{"hash":"{hash}","size":{}}}"#,
+                bytes.len()
+            ));
+        }
+        let index = temp.0.join("index.json");
+        std::fs::write(
+            &index,
+            format!(r#"{{"objects":{{{}}}}}"#, entries.join(",")),
+        )
+        .unwrap();
+        let source = BuiltinRepositorySource::new(None);
+        source.set_installation(Some(installation(temp, &index, &objects)));
+        source
     }
 }

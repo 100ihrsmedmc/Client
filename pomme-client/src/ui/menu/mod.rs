@@ -10,6 +10,7 @@ pub(crate) use options::{apply_resource_pack_options, sync_resource_packs};
 mod servers;
 mod splash;
 mod title_screen;
+mod touch_layout;
 mod worlds;
 
 use std::path::{Path, PathBuf};
@@ -20,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
+use crate::app::input::touch::TouchLayoutSettings;
 use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
@@ -384,6 +386,11 @@ fn load_settings(game_dir: &Path) -> Settings {
         .unwrap_or_default()
 }
 
+/// Where the touch-control layout lives, beside `options.json`.
+fn touch_layout_path(game_dir: &Path) -> PathBuf {
+    game_dir.join("touch_layout.json")
+}
+
 fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
     let path = game_dir.join("options.json");
     let result = serde_json::to_string_pretty(settings)
@@ -636,6 +643,8 @@ enum Screen {
     OptionsCredits,
     CreditsRoll,
     DebugOptions,
+    /// The touch-control layout editor, opened from Controls.
+    OptionsTouchLayout,
 }
 
 impl Screen {
@@ -661,6 +670,7 @@ impl Screen {
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
             Self::DebugOptions => Self::DebugOptions,
+            Self::OptionsTouchLayout => Self::OptionsTouchLayout,
             Self::ServerList => Self::ServerList,
             Self::WorldList => Self::WorldList,
             Self::CreateWorld => Self::CreateWorld,
@@ -878,6 +888,14 @@ pub struct MainMenu {
     pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
+    /// The saved touch-control layout, applied to the overlay and the input
+    /// dispatch. Kept in memory so an edit takes effect without a reload.
+    pub touch_layout: TouchLayoutSettings,
+    /// The touch layout editor's in-progress state (the control being dragged,
+    /// the selected control), while `Screen::OptionsTouchLayout` is open.
+    touch_editor: touch_layout::TouchEditor,
+    /// The touch layout was edited, so the next settings flush writes it.
+    touch_layout_dirty: bool,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
     /// The options were saved, so the game should broadcast them.
@@ -1051,6 +1069,9 @@ impl MainMenu {
             japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
+            touch_layout: TouchLayoutSettings::load(&touch_layout_path(game_dir)),
+            touch_editor: touch_layout::TouchEditor::default(),
+            touch_layout_dirty: false,
             settings_dirty: false,
             options_saved: false,
             bench_render_distance: Default::default(),
@@ -1244,6 +1265,21 @@ impl MainMenu {
         if self.settings_dirty {
             self.save_settings(key_bindings);
         }
+        if self.touch_layout_dirty {
+            self.save_touch_layout();
+        }
+    }
+
+    fn save_touch_layout(&mut self) {
+        let path = touch_layout_path(&self.settings_dir);
+        match self.touch_layout.save(&path) {
+            Ok(()) => self.touch_layout_dirty = false,
+            // A failed write stays dirty so the next screen change retries it,
+            // like `save_settings`.
+            Err(error) => {
+                tracing::warn!("Failed to save touch layout to {}: {error}", path.display())
+            }
+        }
     }
 
     fn save_settings(&mut self, key_bindings: &KeyBindings) {
@@ -1414,6 +1450,7 @@ impl MainMenu {
                 | Screen::OptionsCredits
                 | Screen::CreditsRoll
                 | Screen::DebugOptions
+                | Screen::OptionsTouchLayout
         )
     }
 
@@ -1754,6 +1791,13 @@ impl MainMenu {
             Screen::DebugOptions => {
                 self.build_debug_options(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::OptionsTouchLayout => self.build_options_touch_layout(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
         }
     }
 

@@ -92,7 +92,7 @@ def download_verified(url, expected_sha256, cached):
     if cached.is_file() and sha256(cached.read_bytes()) == expected_sha256:
         return cached
 
-    print(f"downloading {url}")
+    print(f"downloading {url}", file=sys.stderr)
     try:
         with urllib.request.urlopen(url) as response:
             payload = response.read()

@@ -199,6 +199,11 @@ impl AppPhase {
         matches!(self, AppPhase::InGame { game, .. } if game.world_has_pointer())
     }
 
+    /// A screen the touch close button can dismiss is up (in-game only).
+    pub fn touch_close_shown(&self) -> bool {
+        matches!(self, AppPhase::InGame { game, .. } if game.touch_close_shown())
+    }
+
     pub fn gfx_mut(&mut self) -> Option<&mut Gfx> {
         match self {
             AppPhase::Setup { .. } => None,

@@ -10,7 +10,7 @@ use gilrs::{Button, GamepadId, Gilrs};
 use winit::event::{ElementState, KeyEvent, Modifiers, MouseButton, Touch};
 use winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 
-use self::touch::{TouchControls, TouchLayout, TouchOutput};
+use self::touch::{TouchContext, TouchControls, TouchLayout, TouchOutput};
 use crate::app::TICK_RATE_MS;
 use crate::app::phases::AppPhase;
 use crate::app::state_slot::StateSlot;
@@ -319,6 +319,11 @@ impl InputState {
                             {
                                 game.close_menu();
                             }
+                        } else if game.creative_inventory_open {
+                            // The creative screen has no recipe book; Escape
+                            // closes it like any other container screen, rather
+                            // than opening pause over it.
+                            game.close_creative_inventory();
                         } else if game.paused {
                             // Step back through the benchmark sub-screens; close
                             // the menu from the main screen.
@@ -342,9 +347,15 @@ impl InputState {
                 if self.action_just_pressed(Action::Close) && !game.dialog_open() {
                     if !game.dead
                         && !game.death_screen_open
-                        && (game.inventory_open || game.open_container.is_some())
+                        && (game.inventory_open
+                            || game.open_container.is_some()
+                            || game.creative_inventory_open)
                     {
-                        game.close_menu();
+                        if game.creative_inventory_open {
+                            game.close_creative_inventory();
+                        } else {
+                            game.close_menu();
+                        }
                         should_apply_cursor_grab = true;
                     }
 
@@ -1102,14 +1113,14 @@ impl InputState {
         }
     }
 
-    /// `gameplay`: the world has the input (no screen, chat or pause menu).
-    pub fn on_touch(&mut self, touch: &Touch, gameplay: bool, layout: &TouchLayout) {
+    /// `ctx` says whether the world or a dismissable screen has the input.
+    pub fn on_touch(&mut self, touch: &Touch, ctx: TouchContext, layout: &TouchLayout) {
         let p = glam::vec2(touch.location.x as f32, touch.location.y as f32);
         let out = self.touch.on_touch(
             touch.id,
             touch.phase,
             p,
-            gameplay,
+            ctx,
             layout,
             std::time::Instant::now(),
         );

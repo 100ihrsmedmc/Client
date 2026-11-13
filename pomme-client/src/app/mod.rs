@@ -1204,7 +1204,10 @@ impl ApplicationHandler for App {
             }
             // Desktop touchscreens already drive the mouse through the OS.
             WindowEvent::Touch(touch) if cfg!(mobile) => {
-                let gameplay = self.world_has_pointer();
+                let ctx = crate::app::input::touch::TouchContext {
+                    gameplay: self.world_has_pointer(),
+                    close: self.phase.get().touch_close_shown(),
+                };
                 if let Some(gfx) = self.phase.gfx_mut() {
                     let width = gfx.renderer.screen_width() as f32;
                     let height = gfx.renderer.screen_height() as f32;
@@ -1214,7 +1217,7 @@ impl ApplicationHandler for App {
                         gs: self.core.menu.gui_scale(width, height),
                         settings: self.core.menu.touch_layout.clone(),
                     };
-                    self.core.input.on_touch(&touch, gameplay, &layout);
+                    self.core.input.on_touch(&touch, ctx, &layout);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {

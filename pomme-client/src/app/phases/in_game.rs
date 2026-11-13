@@ -941,6 +941,18 @@ impl GameState {
             && !self.chat.is_open()
     }
 
+    /// A touch player can only leave these screens through the on-screen
+    /// close button (or Escape): the inventory and container screens have no
+    /// Back/Close of their own, unlike the pause and death screens. The touch
+    /// overlay draws the close button exactly while this is true, and a tap
+    /// on it closes the screen.
+    pub fn touch_close_shown(&self) -> bool {
+        !self.dialog_open()
+            && (self.inventory_open
+                || self.creative_inventory_open
+                || self.open_container.is_some())
+    }
+
     /// The open screen's panel when it has vanilla's `EffectsInInventory`
     /// (the inventory and creative screens).
     fn effects_screen_panel(
@@ -4682,6 +4694,19 @@ pub fn update_game(
         Some(game.tick_count),
         &text_events,
     );
+
+    // The touch close button sits above the inventory/container screen, so a
+    // touch player can dismiss it the way Escape does. Its geometry matches
+    // what the input dispatch hit-tests.
+    if core.input.touch().seen() && game.touch_close_shown() {
+        let layout = input::touch::TouchLayout {
+            width: sw,
+            height: sh,
+            gs,
+            settings: core.menu.touch_layout.clone(),
+        };
+        crate::ui::touch_controls::build_close_button(&mut elements, &layout);
+    }
 
     if let Some(editor) = game.sign_editor.as_mut() {
         // `Font.width`, in GUI units.

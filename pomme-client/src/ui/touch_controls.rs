@@ -64,3 +64,21 @@ fn push_circle(elements: &mut Vec<MenuElement>, centre: Vec2, radius: f32, color
         color,
     });
 }
+
+/// The close button over an in-game screen (inventory, container, creative).
+/// It rests where the pause button does, so a touch player closes with the
+/// same corner they opened with; the input dispatch hit-tests the same
+/// geometry. Drawn only while a screen it can dismiss is up.
+pub fn build_close_button(elements: &mut Vec<MenuElement>, layout: &TouchLayout) {
+    let centre = layout.close_centre();
+    let radius = layout.close_radius();
+    push_circle(elements, centre, radius, BASE);
+    elements.push(MenuElement::Text {
+        x: centre.x,
+        y: centre.y - FONT_SIZE * layout.gs / 2.0,
+        text: "X".to_owned(),
+        scale: FONT_SIZE * layout.gs,
+        color: WHITE,
+        centered: true,
+    });
+}

@@ -37,6 +37,10 @@ const LOOK_SCALE: f32 = 2.5;
 /// The share of the screen width, from the left, where a press is the stick.
 const STICK_ZONE: f32 = 0.4;
 pub const BUTTON_RADIUS: f32 = 14.0;
+/// The close button drawn over an in-game screen, as a multiple of the button
+/// radius: it rests where the pause button does, so the same corner closes
+/// what the pause button opened, and it is a touch larger for an easy target.
+pub const CLOSE_RADIUS: f32 = BUTTON_RADIUS * 1.5;
 
 /// Where the controls sit on a `width` x `height` screen at GUI scale `gs`.
 ///
@@ -385,6 +389,25 @@ impl TouchLayout {
         }
     }
 
+    /// The close button's centre over an in-game screen: the pause button's
+    /// home, so the same corner of the screen both opens and closes the
+    /// screens a touch player can reach. Drawn and hit-tested by the overlay
+    /// only while a screen is open.
+    pub fn close_centre(&self) -> Vec2 {
+        self.button_centre(TouchButton::Pause)
+    }
+
+    /// The close button's radius in pixels, a little larger than a normal
+    /// button for an easy target.
+    pub fn close_radius(&self) -> f32 {
+        CLOSE_RADIUS * self.gs * self.settings.scale()
+    }
+
+    /// Whether `p` is on the close button, within `slop` extra pixels.
+    pub fn close_at(&self, p: Vec2, slop: f32) -> bool {
+        p.distance(self.close_centre()) <= self.close_radius() + slop
+    }
+
     /// The control under a point, for the layout editor: a button takes
     /// precedence over the stick, as in gameplay, and a small tolerance makes a
     /// control easy to grab.
@@ -438,6 +461,16 @@ enum Role {
     Spent,
 }
 
+/// What the rest of the app looks like to a touch, so the overlay can decide
+/// whether the touch is world input, screen input, or the close button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TouchContext {
+    /// The world has the input (no screen, chat or pause menu open).
+    pub gameplay: bool,
+    /// A screen the touch close button can dismiss is up.
+    pub close: bool,
+}
+
 #[derive(Default)]
 pub struct TouchControls {
     touches: HashMap<u64, Role>,
@@ -450,24 +483,24 @@ impl TouchControls {
         self.seen
     }
 
-    /// Feeds one touch event. `gameplay` is whether the world has the input
-    /// (no screen, chat or pause menu open); a touch keeps the role it
-    /// started with until it lifts.
+    /// Feeds one touch event. `ctx` says whether the world or a dismissable
+    /// screen has the input; a touch keeps the role it started with until it
+    /// lifts.
     pub fn on_touch(
         &mut self,
         id: u64,
         phase: TouchPhase,
         p: Vec2,
-        gameplay: bool,
+        ctx: TouchContext,
         layout: &TouchLayout,
         now: Instant,
     ) -> Vec<TouchOutput> {
         self.seen = true;
         match phase {
-            TouchPhase::Started => self.start(id, p, gameplay, layout, now),
+            TouchPhase::Started => self.start(id, p, ctx, layout, now),
             TouchPhase::Moved => self.drag(id, p, layout),
-            TouchPhase::Ended => self.end(id, now, true, gameplay),
-            TouchPhase::Cancelled => self.end(id, now, false, gameplay),
+            TouchPhase::Ended => self.end(id, now, true, ctx.gameplay),
+            TouchPhase::Cancelled => self.end(id, now, false, ctx.gameplay),
         }
     }
 
@@ -475,15 +508,22 @@ impl TouchControls {
         &mut self,
         id: u64,
         p: Vec2,
-        gameplay: bool,
+        ctx: TouchContext,
         layout: &TouchLayout,
         now: Instant,
     ) -> Vec<TouchOutput> {
-        let (role, out) = if !gameplay {
-            (
-                Role::Pointer,
-                vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
-            )
+        let (role, out) = if !ctx.gameplay {
+            // A screen the touch close button can dismiss: a tap there is
+            // Escape, not a click behind the screen. The button is drawn only
+            // when this flag is set, so the overlay and the hit test agree.
+            if ctx.close && layout.close_at(p, EDIT_GRAB_SLOP) {
+                (Role::Spent, vec![TouchOutput::Tap(Action::OpenMenu)])
+            } else {
+                (
+                    Role::Pointer,
+                    vec![TouchOutput::PointerMove(p), TouchOutput::PointerDown],
+                )
+            }
         } else if let Some(button) = layout.button_at(p) {
             match button.tapped_action() {
                 Some(action) => (Role::Spent, vec![TouchOutput::Tap(action)]),
@@ -618,8 +658,8 @@ mod tests {
     use winit::event::TouchPhase;
 
     use super::{
-        Action, Placement, SIZE_MAX, SIZE_MIN, TouchButton, TouchControl, TouchControls,
-        TouchLayout, TouchLayoutSettings, TouchOutput,
+        Action, Placement, SIZE_MAX, SIZE_MIN, TouchButton, TouchContext, TouchControl,
+        TouchControls, TouchLayout, TouchLayoutSettings, TouchOutput,
     };
 
     /// The built-in layout, which every behavioural test uses.
@@ -640,6 +680,10 @@ mod tests {
         start + Duration::from_millis(ms)
     }
 
+    fn ctx(gameplay: bool, close: bool) -> TouchContext {
+        TouchContext { gameplay, close }
+    }
+
     fn touch(
         c: &mut TouchControls,
         id: u64,
@@ -647,7 +691,7 @@ mod tests {
         p: Vec2,
         at: Instant,
     ) -> Vec<TouchOutput> {
-        c.on_touch(id, phase, p, true, &layout(), at)
+        c.on_touch(id, phase, p, ctx(true, false), &layout(), at)
     }
 
     #[test]
@@ -668,14 +712,28 @@ mod tests {
         touch(&mut c, 1, TouchPhase::Started, LOOK, t);
         assert!(c.tick(ms(t, 300), false).is_empty());
         assert!(
-            c.on_touch(1, TouchPhase::Ended, LOOK, false, &layout(), ms(t, 350))
-                .is_empty()
+            c.on_touch(
+                1,
+                TouchPhase::Ended,
+                LOOK,
+                ctx(false, false),
+                &layout(),
+                ms(t, 350)
+            )
+            .is_empty()
         );
 
         touch(&mut c, 2, TouchPhase::Started, LOOK, t);
         assert_eq!(c.tick(ms(t, 300), true), [TouchOutput::DestroyStart]);
         assert_eq!(
-            c.on_touch(2, TouchPhase::Ended, LOOK, false, &layout(), ms(t, 400)),
+            c.on_touch(
+                2,
+                TouchPhase::Ended,
+                LOOK,
+                ctx(false, false),
+                &layout(),
+                ms(t, 400)
+            ),
             [TouchOutput::DestroyCancel]
         );
     }
@@ -793,13 +851,74 @@ mod tests {
         let (mut c, t) = (TouchControls::default(), Instant::now());
         let p = Vec2::new(300.0, 200.0);
         assert_eq!(
-            c.on_touch(1, TouchPhase::Started, p, false, &layout(), t),
+            c.on_touch(1, TouchPhase::Started, p, ctx(false, false), &layout(), t),
             [TouchOutput::PointerMove(p), TouchOutput::PointerDown]
         );
         assert_eq!(
-            c.on_touch(1, TouchPhase::Ended, p, false, &layout(), t),
+            c.on_touch(1, TouchPhase::Ended, p, ctx(false, false), &layout(), t),
             [TouchOutput::PointerUp]
         );
+    }
+
+    #[test]
+    fn the_close_button_dismisses_a_screen_but_not_the_pointer_elsewhere() {
+        let l = layout();
+        let close = l.close_centre();
+        // A tap on the close button is Escape, not a click behind the screen.
+        let mut c = TouchControls::default();
+        let t = Instant::now();
+        assert_eq!(
+            c.on_touch(1, TouchPhase::Started, close, ctx(false, true), &l, t),
+            [TouchOutput::Tap(Action::OpenMenu)]
+        );
+        assert!(
+            c.on_touch(1, TouchPhase::Ended, close, ctx(false, true), &l, t)
+                .is_empty()
+        );
+
+        // A tap elsewhere is still the pointer.
+        let mut c2 = TouchControls::default();
+        let elsewhere = Vec2::new(400.0, 400.0);
+        assert_eq!(
+            c2.on_touch(1, TouchPhase::Started, elsewhere, ctx(false, true), &l, t),
+            [
+                TouchOutput::PointerMove(elsewhere),
+                TouchOutput::PointerDown
+            ]
+        );
+    }
+
+    #[test]
+    fn the_close_button_is_inert_when_no_screen_is_up() {
+        // `close` is false, so the same point falls through to the pause
+        // button (which rests there) while the world has the pointer.
+        let l = layout();
+        let close = l.close_centre();
+        let mut c = TouchControls::default();
+        let t = Instant::now();
+        assert_eq!(
+            c.on_touch(1, TouchPhase::Started, close, ctx(true, false), &l, t),
+            [TouchOutput::Tap(Action::OpenMenu)]
+        );
+    }
+
+    #[test]
+    fn the_close_geometry_follows_a_saved_pause_placement() {
+        let mut l = layout();
+        // Pause is the last control, so the placement list runs Stick..Pause.
+        l.settings.placements = vec![
+            Placement::default(),
+            Placement::default(),
+            Placement::default(),
+            Placement::default(),
+            Placement {
+                centre: Some((0.1, 0.9)),
+                ..Placement::default()
+            },
+        ];
+        assert_eq!(l.close_centre(), Vec2::new(0.1 * 1600.0, 0.9 * 900.0));
+        assert!(l.close_at(l.close_centre(), 0.0));
+        assert!(!l.close_at(Vec2::ZERO, 0.0));
     }
 
     #[test]
@@ -836,16 +955,16 @@ mod tests {
         // A tap at the new centre is the jump; the built-in centre is not.
         let mut c = TouchControls::default();
         let t = Instant::now();
-        c.on_touch(1, TouchPhase::Started, jump, true, &l, t);
+        c.on_touch(1, TouchPhase::Started, jump, ctx(true, false), &l, t);
         assert!(c.jump_held());
         assert!(
-            c.on_touch(1, TouchPhase::Ended, jump, true, &l, t)
+            c.on_touch(1, TouchPhase::Ended, jump, ctx(true, false), &l, t)
                 .is_empty()
         );
 
         let old = l.default_button_centre(TouchButton::Jump);
         let mut c2 = TouchControls::default();
-        let out = c2.on_touch(1, TouchPhase::Started, old, true, &l, t);
+        let out = c2.on_touch(1, TouchPhase::Started, old, ctx(true, false), &l, t);
         assert!(out.is_empty(), "the built-in centre is no longer the jump");
         assert!(!c2.jump_held());
     }

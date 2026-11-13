@@ -85,7 +85,10 @@ jobs:
       # shaderc is built for the runner against the SDK; the iOS build links
       # MoltenVK as its Vulkan.
       - name: Clippy
-        run: SHADERC_LIB_DIR="$VULKAN_SDK/lib" VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)" cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
+        run: |
+          export VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)"
+          export SHADERC_LIB_DIR="$VULKAN_SDK/lib"
+          cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
 
   fmt:
     needs: changes

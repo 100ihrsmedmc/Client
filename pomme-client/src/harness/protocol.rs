@@ -114,6 +114,8 @@ pub enum Mouse {
     Left,
     Right,
     Middle,
+    Back,
+    Forward,
 }
 
 impl From<Mouse> for winit::event::MouseButton {
@@ -122,6 +124,8 @@ impl From<Mouse> for winit::event::MouseButton {
             Mouse::Left => Self::Left,
             Mouse::Right => Self::Right,
             Mouse::Middle => Self::Middle,
+            Mouse::Back => Self::Back,
+            Mouse::Forward => Self::Forward,
         }
     }
 }
@@ -153,6 +157,8 @@ pub struct OptionSet {
     pub show_subtitles: Option<bool>,
     /// Chunk Fade in seconds, 0 (none) to 2, in twentieths.
     pub chunk_fade: Option<f32>,
+    /// Reduce fps when: `minimized` or `afk`.
+    pub inactivity_fps_limit: Option<crate::ui::menu::InactivityFpsLimit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
@@ -456,6 +462,7 @@ pub fn entities(game: &GameState) -> EntitiesInfo {
 pub struct PlayerInfo {
     pub health: f32,
     pub food: u32,
+    pub air: i32,
     pub level: i32,
     pub game_mode: u8,
     pub effects: Vec<&'static str>,
@@ -481,6 +488,7 @@ pub fn player(game: &GameState) -> PlayerInfo {
     PlayerInfo {
         health: player.health,
         food: player.food,
+        air: player.air_supply,
         level: player.experience_level,
         game_mode: player.game_mode,
         effects: player.effects.names().collect(),

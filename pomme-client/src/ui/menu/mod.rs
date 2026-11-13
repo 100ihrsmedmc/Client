@@ -89,6 +89,8 @@ struct Settings {
     vsync: bool,
     #[serde(default = "default_max_framerate")]
     max_framerate: u32,
+    #[serde(default)]
+    inactivity_fps_limit: InactivityFpsLimit,
     #[serde(default = "default_true")]
     show_online_status: bool,
     #[serde(default = "default_true")]
@@ -164,6 +166,42 @@ fn default_max_framerate() -> u32 {
 /// Top of the Max Framerate slider, where the cap is disabled (matching
 /// vanilla, which treats the slider's max as unlimited).
 pub const MAX_FRAMERATE_UNLIMITED: u32 = 260;
+
+/// Vanilla `InactivityFpsLimit`: when the frame rate drops for an unattended
+/// window.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InactivityFpsLimit {
+    Minimized,
+    #[default]
+    Afk,
+}
+
+impl InactivityFpsLimit {
+    fn cycle(self) -> Self {
+        match self {
+            Self::Minimized => Self::Afk,
+            Self::Afk => Self::Minimized,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Minimized => "Minimized",
+            Self::Afk => "AFK",
+        }
+    }
+
+    fn tooltip(self) -> &'static str {
+        match self {
+            Self::Minimized => "Limits framerate only when the game window is minimized.",
+            Self::Afk => {
+                "Limits framerate to 30 when the game is not getting any player input for more \
+                 than a minute. Further limits it to 10 after 9 more minutes."
+            }
+        }
+    }
+}
 
 const CHUNK_DETAIL_MIN: u32 = 8;
 /// Top of the Chunk Detail slider, where every column meshes at full detail.
@@ -297,6 +335,7 @@ impl Default for Settings {
             entity_shadows: true,
             vsync: true,
             max_framerate: 120,
+            inactivity_fps_limit: InactivityFpsLimit::default(),
             show_online_status: true,
             show_current_server: true,
             skin_cape: true,
@@ -564,10 +603,6 @@ const COL_SEP: [f32; 4] = [1.0, 1.0, 1.0, 0.07];
 /// Tint of the "Pomme" wordmark, on the title screen and in the credits roll.
 const COL_WORDMARK: [f32; 4] = [0.94, 0.96, 0.99, 0.95];
 
-const FIELD_BG: [f32; 4] = [0.06, 0.07, 0.14, 0.8];
-const FIELD_BORDER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
-const FIELD_BORDER_FOCUS: [f32; 4] = [0.29, 0.87, 0.5, 0.5];
-
 const DOUBLE_CLICK_MS: u128 = 400;
 
 enum Screen {
@@ -726,6 +761,9 @@ pub struct MainMenu {
     rt: Arc<tokio::runtime::Runtime>,
     links_open: bool,
     theme_open: bool,
+    /// The open title-screen dropdown's list as last drawn, which the
+    /// buttons under it don't see the cursor through.
+    dropdown_rect: Option<[f32; 4]>,
     /// Return target for Language/Accessibility, which open from both the
     /// title-screen icon row and the Options grid, and for Chat Settings,
     /// which also open from chat.
@@ -803,6 +841,7 @@ pub struct MainMenu {
     pub entity_shadows: bool,
     pub vsync: bool,
     pub max_framerate: u32,
+    pub inactivity_fps_limit: InactivityFpsLimit,
     pub debug_entries: crate::ui::debug_entries::DebugEntries,
     pub show_online_status: bool,
     pub show_current_server: bool,
@@ -925,6 +964,7 @@ impl MainMenu {
             rt,
             links_open: false,
             theme_open: false,
+            dropdown_rect: None,
             settings_back: Screen::Options,
             theme: PanoramaTheme::from_u8(settings.theme),
             transition: None,
@@ -975,6 +1015,7 @@ impl MainMenu {
             entity_shadows: settings.entity_shadows,
             vsync: settings.vsync,
             max_framerate: settings.max_framerate,
+            inactivity_fps_limit: settings.inactivity_fps_limit,
             debug_entries: crate::ui::debug_entries::DebugEntries::load(game_dir),
             show_online_status: settings.show_online_status,
             show_current_server: settings.show_current_server,
@@ -1235,6 +1276,7 @@ impl MainMenu {
                 entity_shadows: self.entity_shadows,
                 vsync: self.vsync,
                 max_framerate: self.max_framerate,
+                inactivity_fps_limit: self.inactivity_fps_limit,
                 show_online_status: self.show_online_status,
                 show_current_server: self.show_current_server,
                 master_volume: self.master_volume,
@@ -1732,6 +1774,8 @@ impl MainMenu {
             Screen::Main => "title",
             Screen::ServerList => "server_list",
             Screen::DirectConnect => "direct_connect",
+            Screen::WorldList => "world_list",
+            Screen::CreateWorld => "create_world",
             _ => "other",
         }
     }
@@ -1766,6 +1810,42 @@ fn test_menu(dir: &str, key_bindings: &mut KeyBindings) -> MainMenu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_theme_list_takes_the_clicks_over_the_buttons_beneath_it() {
+        let mut key_bindings = KeyBindings::default();
+        let width = |text: &str, scale: f32| text.len() as f32 * scale * 0.75;
+        for theme in [
+            PanoramaTheme::Java,
+            PanoramaTheme::Pomme,
+            PanoramaTheme::Bedrock,
+        ] {
+            let open_menu = |key_bindings: &mut KeyBindings| {
+                let mut menu = test_menu("pomme-theme-list-click-test", key_bindings);
+                menu.theme = theme;
+                menu.toggle_theme();
+                menu.build(854.0, 480.0, &MenuInput::default(), key_bindings, width);
+                menu
+            };
+            let [x, y, w, h] = open_menu(&mut key_bindings)
+                .dropdown_rect
+                .expect("the open list is drawn");
+            for (i, j) in (1..10).flat_map(|i| (1..10).map(move |j| (i, j))) {
+                let mut menu = open_menu(&mut key_bindings);
+                let click = MenuInput {
+                    cursor: (x + w * i as f32 / 10.0, y + h * j as f32 / 10.0),
+                    clicked: true,
+                    ..Default::default()
+                };
+                let result = menu.build(854.0, 480.0, &click, &mut key_bindings, width);
+                assert!(
+                    !matches!(result.action, MenuAction::Quit)
+                        && matches!(menu.screen, Screen::Main),
+                    "{theme:?}: a click at ({i}, {j}) in the list reached a button beneath",
+                );
+            }
+        }
+    }
 
     #[test]
     fn options_save_as_their_screen_closes() {
@@ -1983,6 +2063,26 @@ mod tests {
         let loaded: Settings = serde_json::from_str(&json).unwrap();
         assert!(loaded.invert_mouse_x);
         assert!(loaded.invert_mouse_y);
+    }
+
+    #[test]
+    fn inactivity_fps_limit_defaults_to_afk_and_round_trips() {
+        let mut legacy = serde_json::to_value(Settings::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("inactivity_fps_limit");
+        let loaded: Settings = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Afk);
+
+        let settings = Settings {
+            inactivity_fps_limit: InactivityFpsLimit::Afk.cycle(),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains(r#""inactivity_fps_limit":"minimized""#));
+        let loaded: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.inactivity_fps_limit, InactivityFpsLimit::Minimized);
     }
 
     #[test]

@@ -97,6 +97,7 @@ enum Expect {
     List(ListExpect),
     Advancement(AdvancementExpect),
     Chat(ChatExpect),
+    Recipes(RecipesExpect),
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -204,6 +205,7 @@ struct PlayerFields {
     /// Within half a health point.
     health: Option<f32>,
     food: Option<u32>,
+    air: Option<i32>,
     level: Option<i32>,
     game_mode: Option<u8>,
     /// An active effect, by registry path.
@@ -307,6 +309,19 @@ struct AdvancementExpect {
 #[serde(deny_unknown_fields)]
 struct ChatExpect {
     chat: String,
+}
+
+/// The recipe book knows at least `at_least` recipes.
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecipesExpect {
+    recipes: AtLeast,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AtLeast {
+    at_least: usize,
 }
 
 #[derive(Debug, PartialEq)]
@@ -816,6 +831,7 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
             ensure(
                 want.health.is_none_or(|h| (seen.health - h).abs() <= 0.5)
                     && want.food.is_none_or(|f| seen.food == f)
+                    && want.air.is_none_or(|a| seen.air == a)
                     && want.level.is_none_or(|l| seen.level == l)
                     && want.game_mode.is_none_or(|m| seen.game_mode == m)
                     && want.effect.as_deref().is_none_or(has)
@@ -975,6 +991,12 @@ fn check(expect: &Expect, core: &AppCore, phase: &AppPhase) -> Result<(), String
                 .any(|line| line.contains(chat.as_str())),
             || format!("no chat line containing {chat:?}"),
         ),
+        Expect::Recipes(RecipesExpect {
+            recipes: AtLeast { at_least },
+        }) => {
+            let known = game.recipe_book.known_in_vanilla_order().len();
+            ensure(known >= *at_least, || format!("{known} recipes known"))
+        }
     }
 }
 
@@ -1067,6 +1089,7 @@ mod tests {
                 resource_pack: None,
                 show_subtitles: None,
                 chunk_fade: None,
+                inactivity_fps_limit: None,
             }))
         );
         assert_eq!(

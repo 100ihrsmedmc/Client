@@ -95,7 +95,7 @@ pub(super) fn push_button(
     hovered
 }
 
-/// Renders a `TextFieldState` (vanilla EditBox port): border, background, the
+/// Renders a `TextFieldState` (vanilla EditBox port): the field sprite, the
 /// horizontally-scrolled display window, the selection highlight, and the caret
 /// (1px bar in insert mode, trailing `_` glyph otherwise), blinking per
 /// `render_info`.
@@ -112,27 +112,7 @@ pub(super) fn push_text_field(
     focused: bool,
     text_width_fn: &dyn Fn(&str, f32) -> f32,
 ) {
-    let border = if focused {
-        FIELD_BORDER_FOCUS
-    } else {
-        FIELD_BORDER
-    };
-    elements.push(MenuElement::Rect {
-        x: x - gs,
-        y: y - gs,
-        w: w + gs * 2.0,
-        h: h + gs * 2.0,
-        corner_radius: 0.0,
-        color: border,
-    });
-    elements.push(MenuElement::Rect {
-        x,
-        y,
-        w,
-        h,
-        corner_radius: 0.0,
-        color: FIELD_BG,
-    });
+    common::push_text_field_box(elements, [x, y, w, h], gs, focused);
 
     let pad = 4.0 * gs;
     let text_x = x + pad;
@@ -663,7 +643,8 @@ impl DropdownStyle {
 
     /// Draws an open list with its bottom edge at `drop_bottom` and returns
     /// the row clicked this frame. Clears `open` on a row click or a click
-    /// away; `anchor` is the toggling icon, so clicking it doesn't count.
+    /// away, else records the list in `drawn`; `anchor` is the toggling icon,
+    /// so clicking it doesn't count.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_list(
         &self,
@@ -672,6 +653,7 @@ impl DropdownStyle {
         cursor: (f32, f32),
         clicked: bool,
         open: &mut bool,
+        drawn: &mut Option<[f32; 4]>,
         anchor: [f32; 4],
         drop_x: f32,
         drop_bottom: f32,
@@ -705,6 +687,8 @@ impl DropdownStyle {
         let outside = !common::hit_test(cursor, list) && !common::hit_test(cursor, anchor);
         if picked.is_some() || (clicked && outside) {
             *open = false;
+        } else {
+            *drawn = Some(list);
         }
         picked
     }
@@ -901,7 +885,7 @@ pub(super) fn push_screen_chrome(
     let fs = common::FONT_SIZE * gs;
     let chrome = push_chrome_frame(elements, sw, sh, gs, HEADER_FOOTER_H);
     elements.push(MenuElement::Text {
-        x: sw / 2.0,
+        x: common::gui_half_width(sw, gs),
         y: (chrome.header_h - fs) / 2.0,
         text: title.into(),
         scale: fs,
@@ -1201,6 +1185,27 @@ impl MainMenu {
         self.links_open = false;
     }
 
+    /// The title screen's input for everything but its dropdowns: no cursor
+    /// or click over last frame's open list, so picking a row can't also
+    /// press the button beneath it. Pomme-only: vanilla's title screen has
+    /// no dropdowns.
+    pub(super) fn input_beneath_dropdown(&mut self, input: &MenuInput) -> MenuInput {
+        let covered = self
+            .dropdown_rect
+            .take()
+            .is_some_and(|rect| common::hit_test(input.cursor, rect));
+        MenuInput {
+            cursor: if covered {
+                (f32::NEG_INFINITY, f32::NEG_INFINITY)
+            } else {
+                input.cursor
+            },
+            clicked: input.clicked && !covered,
+            mouse_held: input.mouse_held && !covered,
+            ..Default::default()
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn push_links_dropdown(
         &mut self,
@@ -1227,6 +1232,7 @@ impl MainMenu {
             cursor,
             clicked,
             &mut self.links_open,
+            &mut self.dropdown_rect,
             anchor,
             drop_x,
             drop_bottom,
@@ -1280,6 +1286,7 @@ impl MainMenu {
             cursor,
             clicked,
             &mut self.theme_open,
+            &mut self.dropdown_rect,
             anchor,
             drop_x,
             drop_bottom,
@@ -1521,10 +1528,12 @@ impl MainMenu {
         let row_pad = 16.0 * gs;
         let cursor = input.cursor;
         let clicked = input.clicked;
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
+        // `ConfirmScreen` centres its layout with `FrameLayout.centerInRectangle`.
+        let row_x = common::gui_centered(screen_w, 2.0 * CONFIRM_BTN_W + BTN_GAP, gs);
 
         let column_h = (fs + spacing) * 2.0 + row_pad + btn_h;
-        let mut y = (screen_h - column_h) / 2.0;
+        let mut y = common::gui_centered(screen_h, column_h / gs, gs);
 
         let mut elements = vec![MenuElement::BlurBackground];
         let mut any_hovered = false;
@@ -1544,7 +1553,7 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
         let mut choice = None;
-        for (i, (label, x)) in [(yes, cx - btn_w - gap / 2.0), ("Cancel", cx + gap / 2.0)]
+        for (i, (label, x)) in [(yes, row_x), ("Cancel", row_x + btn_w + gap)]
             .into_iter()
             .enumerate()
         {
@@ -1584,5 +1593,36 @@ impl MainMenu {
             },
             choice,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_text_field_draws_the_edit_box_sprite_for_its_focus() {
+        let sprite = |focused| {
+            let mut elements = Vec::new();
+            let field = TextFieldState::new(32);
+            push_text_field(
+                &mut elements,
+                0.0,
+                0.0,
+                200.0,
+                20.0,
+                8.0,
+                1.0,
+                &field,
+                focused,
+                &|text, _| text.len() as f32,
+            );
+            match elements.first() {
+                Some(MenuElement::NineSlice { sprite, .. }) => *sprite,
+                _ => panic!("expected the field sprite first"),
+            }
+        };
+        assert_eq!(sprite(false), SpriteId::WidgetTextField);
+        assert_eq!(sprite(true), SpriteId::WidgetTextFieldHighlighted);
     }
 }

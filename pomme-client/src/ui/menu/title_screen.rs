@@ -54,8 +54,9 @@ impl MainMenu {
         key_bindings: &KeyBindings,
     ) -> MainMenuResult {
         let gs = self.gui_scale(screen_w, screen_h);
-        let cursor = input.cursor;
-        let clicked = input.clicked;
+        let beneath = self.input_beneath_dropdown(input);
+        let cursor = beneath.cursor;
+        let clicked = beneath.clicked;
         let fs = common::FONT_SIZE * gs;
         let btn_h = common::BTN_H * gs;
 
@@ -67,9 +68,9 @@ impl MainMenu {
         self.focus_advance(input);
         let mut ctx = self.make_focus_ctx(input);
 
-        let cx = screen_w / 2.0;
+        let cx = common::gui_half_width(screen_w, gs);
         // `int topPos = this.height / 4 + 48`.
-        let base = screen_h / 4.0 + 48.0 * gs;
+        let base = common::gui_quarter_height(screen_h, gs) + 48.0 * gs;
         let col_x = cx - COL_W / 2.0 * gs;
         let col_w = COL_W * gs;
 
@@ -92,7 +93,10 @@ impl MainMenu {
 
         self.push_splash(
             &mut elements,
-            (cx + SPLASH_WIDTH_OFFSET * gs, SPLASH_HEIGHT_OFFSET * gs),
+            (
+                common::gui_float_half_width(screen_w, gs) + SPLASH_WIDTH_OFFSET * gs,
+                SPLASH_HEIGHT_OFFSET * gs,
+            ),
             gs,
             &text_width_fn,
             true,
@@ -307,8 +311,8 @@ impl MainMenu {
         self.push_links_dropdown(
             &mut elements,
             &mut any_hovered,
-            cursor,
-            clicked,
+            input.cursor,
+            input.clicked,
             &drop_style,
             [links_x, extras_y, icon_size, icon_size],
             drop_right - links_w,
@@ -319,8 +323,8 @@ impl MainMenu {
         self.push_theme_dropdown(
             &mut elements,
             &mut any_hovered,
-            cursor,
-            clicked,
+            input.cursor,
+            input.clicked,
             &drop_style,
             [theme_x, extras_y, icon_size, icon_size],
             drop_right - theme_w,

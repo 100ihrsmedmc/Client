@@ -2,11 +2,21 @@
 //! dragging elsewhere to look, a tap to use, a still hold to destroy, and
 //! buttons for jump, inventory and pause. Outside gameplay a touch is the
 //! mouse pointer, so every screen works unchanged.
+//!
+//! Where each control sits is data ([`TouchLayoutSettings`]), not a constant:
+//! a placement stores a normalized centre, a size multiplier and an opacity,
+//! each optional so an absent value means the built-in position. The input
+//! dispatch and the overlay draw both read the same [`TouchLayout`], so an
+//! edited layout is honoured by both. The data-driven layout, the normalized
+//! coordinates and the optional-override scheme follow Horizon's MIT-licensed
+//! touch layout (`crates/horizon-client-render/src/touch/layout.rs`); the
+//! code here is Pomme's own, written for its fixed-layout controls.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use glam::Vec2;
+use serde::{Deserialize, Serialize};
 use winit::event::TouchPhase;
 
 use super::action::Action;
@@ -26,13 +36,135 @@ const STICK_ZONE: f32 = 0.4;
 pub const BUTTON_RADIUS: f32 = 14.0;
 
 /// Where the controls sit on a `width` x `height` screen at GUI scale `gs`.
-#[derive(Clone, Copy)]
+///
+/// The built-in positions are the defaults; a [`TouchLayoutSettings`] may
+/// override any control's centre, size and opacity. Everything an edit can
+/// change lives in `settings`, so the input dispatch and the overlay draw see
+/// the same geometry.
+#[derive(Clone)]
 pub struct TouchLayout {
     pub width: f32,
     pub height: f32,
     pub gs: f32,
+    pub settings: TouchLayoutSettings,
 }
 
+/// A control a player can move, resize or fade. The order is the index into
+/// [`TouchLayoutSettings::placements`], so new controls go at the end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TouchControl {
+    Stick,
+    Jump,
+    Chat,
+    Inventory,
+    Pause,
+}
+
+/// One control's saved placement. Every field is optional: an absent field
+/// keeps the built-in position, size or opacity, so a save written before a
+/// control existed still loads and a partial edit changes only what it names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Placement {
+    /// The centre as a fraction of the screen, `(0, 0)` top-left, `(1, 1)`
+    /// bottom-right. `None` keeps the built-in centre.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub centre: Option<(f32, f32)>,
+    /// The control's size multiplier (1.0 is the built-in size).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<f32>,
+    /// The control's draw opacity, 0..1. `None` keeps the built-in opacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f32>,
+}
+
+impl Placement {
+    /// Whether this placement says anything; an empty one is dropped on save.
+    pub fn is_default(&self) -> bool {
+        self.centre.is_none() && self.size.is_none() && self.opacity.is_none()
+    }
+
+    /// The size multiplier, clamped to a sane range so a bad save cannot make
+    /// a control unusable.
+    pub fn size_or_default(&self) -> f32 {
+        self.size.unwrap_or(1.0).clamp(SIZE_MIN, SIZE_MAX)
+    }
+
+    /// The draw opacity, clamped to `0..1`.
+    pub fn opacity_or_default(&self) -> f32 {
+        self.opacity.unwrap_or(1.0).clamp(0.0, 1.0)
+    }
+}
+
+/// The player's saved touch layout, as JSON. Missing fields take their
+/// defaults, so later controls and options can be added without resetting a
+/// saved file.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TouchLayoutSettings {
+    /// Per-control placement, indexed by [`TouchControl`]. Kept as a `Vec` so
+    /// a shorter save (an older version) loads; a missing entry is default.
+    #[serde(default)]
+    pub placements: Vec<Placement>,
+    /// A global size multiplier applied on top of each control's own size.
+    #[serde(default = "one")]
+    pub scale: f32,
+}
+
+/// The default is the built-in layout: no placements, scale 1.0. This cannot
+/// be derived, because `f32::default()` is 0.0, which would zero every control.
+impl Default for TouchLayoutSettings {
+    fn default() -> Self {
+        Self {
+            placements: Vec::new(),
+            scale: 1.0,
+        }
+    }
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+/// The smallest and largest a control's size multiplier may be.
+pub const SIZE_MIN: f32 = 0.5;
+pub const SIZE_MAX: f32 = 2.0;
+
+impl TouchLayoutSettings {
+    /// This control's placement, or the default when the save is short.
+    pub fn placement(&self, control: TouchControl) -> Placement {
+        self.placements
+            .get(control as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The global scale, clamped so a bad save cannot zero the controls out.
+    pub fn scale(&self) -> f32 {
+        self.scale.clamp(SIZE_MIN, SIZE_MAX)
+    }
+
+    /// Load the saved layout, or the default when the file is missing or
+    /// unreadable. A corrupt file is not an error: it falls back to default.
+    pub fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    /// Write the layout, dropping trailing empty placements so the file stays
+    /// small. Atomic, like the other options writes.
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let mut trimmed = self.clone();
+        while trimmed.placements.last().is_some_and(Placement::is_default) {
+            trimmed.placements.pop();
+        }
+        let json = serde_json::to_string_pretty(&trimmed).map_err(std::io::Error::other)?;
+        crate::util::write_atomic(path, json.as_bytes())
+    }
+}
+
+/// A movable button. The order is the index into [`TouchLayoutSettings`]'s
+/// placements, so it matches [`TouchControl`] one-to-one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TouchButton {
     Jump,
@@ -43,6 +175,16 @@ pub enum TouchButton {
 
 impl TouchButton {
     pub const ALL: [Self; 4] = [Self::Jump, Self::Chat, Self::Inventory, Self::Pause];
+
+    /// The movable control this button edits and reads its placement from.
+    pub fn control(self) -> TouchControl {
+        match self {
+            Self::Jump => TouchControl::Jump,
+            Self::Chat => TouchControl::Chat,
+            Self::Inventory => TouchControl::Inventory,
+            Self::Pause => TouchControl::Pause,
+        }
+    }
 
     pub fn label(self) -> &'static str {
         match self {
@@ -65,8 +207,9 @@ impl TouchButton {
 }
 
 impl TouchLayout {
-    /// A button's centre; all share [`BUTTON_RADIUS`].
-    pub fn button_centre(&self, button: TouchButton) -> Vec2 {
+    /// The built-in centre for a button, before any saved placement. This is
+    /// the geometry the fixed-layout controls always had.
+    pub fn default_button_centre(&self, button: TouchButton) -> Vec2 {
         let inset = 2.0 * BUTTON_RADIUS * self.gs;
         match button {
             TouchButton::Jump => Vec2::new(self.width - inset, self.height - 1.5 * inset),
@@ -76,16 +219,74 @@ impl TouchLayout {
         }
     }
 
-    /// Where the stick rests until a press places it.
+    /// A button's centre, honouring a saved placement. A placement's centre is
+    /// a screen fraction; a saved one is clamped so the button stays on screen.
+    pub fn button_centre(&self, button: TouchButton) -> Vec2 {
+        let placement = self.settings.placement(button.control());
+        match placement.centre {
+            Some((x, y)) => {
+                let radius = self.button_radius(button);
+                Vec2::new(
+                    (x * self.width).clamp(radius, self.width - radius),
+                    (y * self.height).clamp(radius, self.height - radius),
+                )
+            }
+            None => self.default_button_centre(button),
+        }
+    }
+
+    /// A button's radius in pixels, with the saved size applied.
+    pub fn button_radius(&self, button: TouchButton) -> f32 {
+        BUTTON_RADIUS * self.gs * self.button_scale(button)
+    }
+
+    fn button_scale(&self, button: TouchButton) -> f32 {
+        self.settings.scale() * self.settings.placement(button.control()).size_or_default()
+    }
+
+    /// A button's draw opacity, honouring a saved placement.
+    pub fn button_opacity(&self, button: TouchButton) -> f32 {
+        self.settings
+            .placement(button.control())
+            .opacity_or_default()
+    }
+
+    /// Where the stick rests until a press places it, honouring a saved
+    /// placement.
     pub fn stick_home(&self) -> Vec2 {
-        let inset = 1.6 * STICK_RADIUS * self.gs;
-        Vec2::new(inset, self.height - inset)
+        let placement = self.settings.placement(TouchControl::Stick);
+        match placement.centre {
+            Some((x, y)) => {
+                let radius = self.stick_radius();
+                Vec2::new(
+                    (x * self.width).clamp(radius, self.width - radius),
+                    (y * self.height).clamp(radius, self.height - radius),
+                )
+            }
+            None => {
+                let inset = 1.6 * STICK_RADIUS * self.gs;
+                Vec2::new(inset, self.height - inset)
+            }
+        }
+    }
+
+    /// The stick's travel radius in pixels, with the saved size applied.
+    pub fn stick_radius(&self) -> f32 {
+        let placement = self.settings.placement(TouchControl::Stick);
+        STICK_RADIUS * self.gs * self.settings.scale() * placement.size_or_default()
+    }
+
+    /// The stick's draw opacity, honouring a saved placement.
+    pub fn stick_opacity(&self) -> f32 {
+        self.settings
+            .placement(TouchControl::Stick)
+            .opacity_or_default()
     }
 
     fn button_at(&self, p: Vec2) -> Option<TouchButton> {
         TouchButton::ALL
             .into_iter()
-            .find(|&b| p.distance(self.button_centre(b)) <= BUTTON_RADIUS * self.gs)
+            .find(|&b| p.distance(self.button_centre(b)) <= self.button_radius(b))
     }
 
     fn hotbar_slot_at(&self, p: Vec2) -> Option<u8> {
@@ -189,7 +390,7 @@ impl TouchControls {
                 Role::Stick {
                     origin: p,
                     current: p,
-                    radius: STICK_RADIUS * layout.gs,
+                    radius: layout.stick_radius(),
                 },
                 Vec::new(),
             )
@@ -310,13 +511,21 @@ mod tests {
     use glam::Vec2;
     use winit::event::TouchPhase;
 
-    use super::{Action, TouchButton, TouchControls, TouchLayout, TouchOutput};
-
-    const LAYOUT: TouchLayout = TouchLayout {
-        width: 1600.0,
-        height: 900.0,
-        gs: 2.0,
+    use super::{
+        Action, Placement, TouchButton, TouchControl, TouchControls, TouchLayout,
+        TouchLayoutSettings, TouchOutput,
     };
+
+    /// The built-in layout, which every behavioural test uses.
+    fn layout() -> TouchLayout {
+        TouchLayout {
+            width: 1600.0,
+            height: 900.0,
+            gs: 2.0,
+            settings: TouchLayoutSettings::default(),
+        }
+    }
+
     /// Right of the stick zone, above the hotbar, away from the buttons.
     const LOOK: Vec2 = Vec2::new(1000.0, 400.0);
     const STICK: Vec2 = Vec2::new(200.0, 600.0);
@@ -332,7 +541,7 @@ mod tests {
         p: Vec2,
         at: Instant,
     ) -> Vec<TouchOutput> {
-        c.on_touch(id, phase, p, true, &LAYOUT, at)
+        c.on_touch(id, phase, p, true, &layout(), at)
     }
 
     #[test]
@@ -353,14 +562,14 @@ mod tests {
         touch(&mut c, 1, TouchPhase::Started, LOOK, t);
         assert!(c.tick(ms(t, 300), false).is_empty());
         assert!(
-            c.on_touch(1, TouchPhase::Ended, LOOK, false, &LAYOUT, ms(t, 350))
+            c.on_touch(1, TouchPhase::Ended, LOOK, false, &layout(), ms(t, 350))
                 .is_empty()
         );
 
         touch(&mut c, 2, TouchPhase::Started, LOOK, t);
         assert_eq!(c.tick(ms(t, 300), true), [TouchOutput::DestroyStart]);
         assert_eq!(
-            c.on_touch(2, TouchPhase::Ended, LOOK, false, &LAYOUT, ms(t, 400)),
+            c.on_touch(2, TouchPhase::Ended, LOOK, false, &layout(), ms(t, 400)),
             [TouchOutput::DestroyCancel]
         );
     }
@@ -434,7 +643,7 @@ mod tests {
     #[test]
     fn buttons_and_hotbar_fire_on_press() {
         let (mut c, t) = (TouchControls::default(), Instant::now());
-        let pause = LAYOUT.button_centre(TouchButton::Pause);
+        let pause = layout().button_centre(TouchButton::Pause);
         assert_eq!(
             touch(&mut c, 1, TouchPhase::Started, pause, t),
             [TouchOutput::Tap(Action::OpenMenu)]
@@ -445,7 +654,7 @@ mod tests {
                 &mut c,
                 4,
                 TouchPhase::Started,
-                LAYOUT.button_centre(TouchButton::Chat),
+                layout().button_centre(TouchButton::Chat),
                 t
             ),
             [TouchOutput::Tap(Action::OpenChat)]
@@ -455,7 +664,7 @@ mod tests {
             &mut c,
             2,
             TouchPhase::Started,
-            LAYOUT.button_centre(TouchButton::Jump),
+            layout().button_centre(TouchButton::Jump),
             t,
         );
         assert!(c.jump_held());
@@ -463,7 +672,10 @@ mod tests {
         assert!(!c.jump_held());
 
         // The hotbar's first slot starts 1 unit in from its left edge.
-        let first_slot = Vec2::new(LAYOUT.width / 2.0 - 91.0 * 2.0 + 10.0, LAYOUT.height - 10.0);
+        let first_slot = Vec2::new(
+            layout().width / 2.0 - 91.0 * 2.0 + 10.0,
+            layout().height - 10.0,
+        );
         assert_eq!(
             touch(&mut c, 3, TouchPhase::Started, first_slot, t),
             [TouchOutput::Hotbar(0)]
@@ -475,12 +687,194 @@ mod tests {
         let (mut c, t) = (TouchControls::default(), Instant::now());
         let p = Vec2::new(300.0, 200.0);
         assert_eq!(
-            c.on_touch(1, TouchPhase::Started, p, false, &LAYOUT, t),
+            c.on_touch(1, TouchPhase::Started, p, false, &layout(), t),
             [TouchOutput::PointerMove(p), TouchOutput::PointerDown]
         );
         assert_eq!(
-            c.on_touch(1, TouchPhase::Ended, p, false, &LAYOUT, t),
+            c.on_touch(1, TouchPhase::Ended, p, false, &layout(), t),
             [TouchOutput::PointerUp]
         );
+    }
+
+    #[test]
+    fn default_layout_matches_the_builtin_geometry() {
+        let l = layout();
+        // An absent placement must not move anything.
+        assert_eq!(
+            l.button_centre(TouchButton::Jump),
+            l.default_button_centre(TouchButton::Jump)
+        );
+        for b in TouchButton::ALL {
+            assert_eq!(l.button_centre(b), l.default_button_centre(b));
+            assert_eq!(l.button_opacity(b), 1.0);
+        }
+        assert_eq!(
+            l.stick_home(),
+            Vec2::new(1.6 * 30.0 * 2.0, 900.0 - 1.6 * 30.0 * 2.0)
+        );
+    }
+
+    #[test]
+    fn a_saved_centre_moves_the_button_and_the_hit_test() {
+        let mut l = layout();
+        l.settings.placements = vec![
+            Placement::default(),
+            Placement {
+                centre: Some((0.25, 0.75)),
+                ..Placement::default()
+            },
+        ];
+        let jump = l.button_centre(TouchButton::Jump);
+        assert_eq!(jump, Vec2::new(0.25 * 1600.0, 0.75 * 900.0));
+
+        // A tap at the new centre is the jump; the built-in centre is not.
+        let mut c = TouchControls::default();
+        let t = Instant::now();
+        c.on_touch(1, TouchPhase::Started, jump, true, &l, t);
+        assert!(c.jump_held());
+        assert!(
+            c.on_touch(1, TouchPhase::Ended, jump, true, &l, t)
+                .is_empty()
+        );
+
+        let old = l.default_button_centre(TouchButton::Jump);
+        let mut c2 = TouchControls::default();
+        let out = c2.on_touch(1, TouchPhase::Started, old, true, &l, t);
+        assert!(out.is_empty(), "the built-in centre is no longer the jump");
+        assert!(!c2.jump_held());
+    }
+
+    #[test]
+    fn a_saved_size_scales_the_button_radius() {
+        let mut l = layout();
+        l.settings.placements = vec![
+            Placement::default(),
+            Placement {
+                size: Some(1.5),
+                ..Placement::default()
+            },
+        ];
+        assert_eq!(l.button_radius(TouchButton::Jump), 14.0 * 2.0 * 1.5);
+        // The global scale compounds the per-control size.
+        l.settings.scale = 0.5;
+        assert_eq!(l.button_radius(TouchButton::Jump), 14.0 * 2.0 * 1.5 * 0.5);
+    }
+
+    #[test]
+    fn opacity_follows_the_placement_and_clamps() {
+        let mut l = layout();
+        l.settings.placements = vec![
+            Placement {
+                opacity: Some(0.4),
+                ..Placement::default()
+            },
+            Placement {
+                opacity: Some(5.0),
+                ..Placement::default()
+            },
+        ];
+        assert_eq!(l.stick_opacity(), 0.4);
+        assert_eq!(l.button_opacity(TouchButton::Jump), 1.0);
+        assert_eq!(l.button_opacity(TouchButton::Chat), 1.0);
+    }
+
+    #[test]
+    fn a_corrupt_or_short_save_still_loads() {
+        let dir = std::env::temp_dir().join(format!("pomme-touch-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("touch_layout.json");
+
+        // Missing file: the default layout.
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(
+            TouchLayoutSettings::load(&path),
+            TouchLayoutSettings::default()
+        );
+
+        // Corrupt file: still the default, not a panic.
+        std::fs::write(&path, b"{ this is not json").unwrap();
+        assert_eq!(
+            TouchLayoutSettings::load(&path),
+            TouchLayoutSettings::default()
+        );
+
+        // A short save with only the stick placed loads, and the rest default.
+        std::fs::write(&path, br#"{"placements":[{"centre":[0.3,0.8]}]}"#).unwrap();
+        let loaded = TouchLayoutSettings::load(&path);
+        assert_eq!(
+            loaded.placement(TouchControl::Stick).centre,
+            Some((0.3, 0.8))
+        );
+        assert_eq!(loaded.placement(TouchControl::Pause), Placement::default());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_round_trips_and_drops_trailing_defaults() {
+        let dir = std::env::temp_dir().join(format!("pomme-touch-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("touch_layout.json");
+
+        let settings = TouchLayoutSettings {
+            placements: vec![
+                Placement {
+                    centre: Some((0.2, 0.7)),
+                    size: Some(1.25),
+                    opacity: Some(0.6),
+                },
+                Placement::default(),
+                Placement::default(),
+            ],
+            scale: 1.1,
+        };
+        settings.save(&path).unwrap();
+
+        // The empty trailing placements are gone from the file.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("placements\": [\n    {},\n    {}"), "{raw}");
+
+        let loaded = TouchLayoutSettings::load(&path);
+        assert_eq!(loaded.placements.len(), 1);
+        assert_eq!(loaded.scale, 1.1);
+        assert_eq!(
+            loaded.placement(TouchControl::Stick),
+            Placement {
+                centre: Some((0.2, 0.7)),
+                size: Some(1.25),
+                opacity: Some(0.6),
+            }
+        );
+
+        // Saving the loaded settings again is stable.
+        loaded.save(&path).unwrap();
+        assert_eq!(TouchLayoutSettings::load(&path), loaded);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_saved_centre_is_clamped_onto_the_screen() {
+        let mut l = layout();
+        l.settings.placements = vec![Placement {
+            centre: Some((-1.0, 5.0)),
+            ..Placement::default()
+        }];
+        let home = l.stick_home();
+        let r = l.stick_radius();
+        assert_eq!(home.x, r);
+        assert_eq!(home.y, 900.0 - r);
+    }
+
+    #[test]
+    fn size_and_scale_are_clamped() {
+        let mut l = layout();
+        l.settings.scale = 0.0;
+        l.settings.placements = vec![Placement {
+            size: Some(100.0),
+            ..Placement::default()
+        }];
+        // 100.0 clamps to SIZE_MAX, 0.0 scale clamps to SIZE_MIN.
+        assert_eq!(l.stick_radius(), 30.0 * 2.0 * 2.0 * 0.5);
     }
 }

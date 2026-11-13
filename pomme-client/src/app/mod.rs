@@ -1212,6 +1212,7 @@ impl ApplicationHandler for App {
                         width,
                         height,
                         gs: self.core.menu.gui_scale(width, height),
+                        settings: self.core.menu.touch_layout.clone(),
                     };
                     self.core.input.on_touch(&touch, gameplay, &layout);
                 }

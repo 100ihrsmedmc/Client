@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use winit::keyboard::KeyCode;
 
 use crate::app::core::DisplayMode;
+use crate::app::input::touch::TouchLayoutSettings;
 use crate::app::input::{Action, KeyBindings};
 use crate::audio::SoundCategory;
 use crate::renderer::CloudMode;
@@ -382,6 +383,11 @@ fn load_settings(game_dir: &Path) -> Settings {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Where the touch-control layout lives, beside `options.json`.
+fn touch_layout_path(game_dir: &Path) -> PathBuf {
+    game_dir.join("touch_layout.json")
 }
 
 fn save_settings(game_dir: &Path, settings: &Settings) -> std::io::Result<()> {
@@ -878,6 +884,11 @@ pub struct MainMenu {
     pub japanese_glyph_variants: bool,
     active_slider: Option<&'static str>,
     settings_dir: PathBuf,
+    /// The saved touch-control layout, applied to the overlay and the input
+    /// dispatch. Kept in memory so an edit takes effect without a reload.
+    pub touch_layout: TouchLayoutSettings,
+    /// The touch layout was edited, so the next settings flush writes it.
+    touch_layout_dirty: bool,
     /// Set by slider drags, written by `flush_settings`.
     settings_dirty: bool,
     /// The options were saved, so the game should broadcast them.
@@ -1051,6 +1062,8 @@ impl MainMenu {
             japanese_glyph_variants: settings.japanese_glyph_variants,
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
+            touch_layout: TouchLayoutSettings::load(&touch_layout_path(game_dir)),
+            touch_layout_dirty: false,
             settings_dirty: false,
             options_saved: false,
             bench_render_distance: Default::default(),
@@ -1243,6 +1256,21 @@ impl MainMenu {
     pub fn flush_settings(&mut self, key_bindings: &KeyBindings) {
         if self.settings_dirty {
             self.save_settings(key_bindings);
+        }
+        if self.touch_layout_dirty {
+            self.save_touch_layout();
+        }
+    }
+
+    fn save_touch_layout(&mut self) {
+        let path = touch_layout_path(&self.settings_dir);
+        match self.touch_layout.save(&path) {
+            Ok(()) => self.touch_layout_dirty = false,
+            // A failed write stays dirty so the next screen change retries it,
+            // like `save_settings`.
+            Err(error) => {
+                tracing::warn!("Failed to save touch layout to {}: {error}", path.display())
+            }
         }
     }
 

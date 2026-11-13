@@ -19,9 +19,17 @@ fi
 app="$TARGET_BUILD_DIR/$WRAPPER_NAME"
 frameworks="$TARGET_BUILD_DIR/$FRAMEWORKS_FOLDER_PATH"
 export PATH="$HOME/.cargo/bin:$PATH"
-# Xcode points these at the iOS SDK, which would break the host-built build
-# scripts (shaderc); cc picks each target's SDK itself.
-unset SDKROOT LIBRARY_PATH
+
+# Xcode sets SDKROOT to the iPhoneOS SDK. Cargo also builds host-side native
+# dependencies (for example aws-lc-sys), which need the macOS SDK instead.
+# Keep the host SDK as the default, and explicitly select the iPhoneOS SDK for
+# C dependencies compiled for the aarch64-apple-ios target.
+HOST_MACOS_SDK="$(xcrun --sdk macosx --show-sdk-path)"
+IOS_SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+export SDKROOT="$HOST_MACOS_SDK"
+export CC_aarch64_apple_ios="$(xcrun --sdk iphoneos --find clang)"
+export CFLAGS_aarch64_apple_ios="-isysroot $IOS_SDK -miphoneos-version-min=16.0"
+unset LIBRARY_PATH
 
 cd "$PROJECT_DIR/.."
 # Keep the host Vulkan SDK available for shaderc-sys. The iOS link step needs

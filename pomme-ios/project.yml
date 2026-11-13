@@ -27,6 +27,11 @@ targets:
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         UIStatusBarHidden: true
+        # ProMotion displays (iPhone 13 Pro and later, iPad Pro) hold an app to
+        # a 60 Hz minimum frame duration unless it opts out. Pomme's Max
+        # Framerate setting goes up to 120, so without this it could never be
+        # reached. Horizon's iOS plist sets it too.
+        CADisableMinimumFrameDurationOnPhone: true
         UIViewControllerBasedStatusBarAppearance: false
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationLandscapeLeft

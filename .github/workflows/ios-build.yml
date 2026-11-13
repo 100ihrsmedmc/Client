@@ -114,19 +114,21 @@ jobs:
           EOF
           chmod +x "$RUNNER_TEMP/clang-macos-sdk"
           export CC_aarch64_apple_darwin="$RUNNER_TEMP/clang-macos-sdk"
-          export "CC_aarch64-apple-darwin=$RUNNER_TEMP/clang-macos-sdk"
 
-          xcodebuild \
-            -project pomme-ios/Pomme.xcodeproj \
-            -scheme Pomme \
-            -sdk iphoneos \
-            -configuration Release \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGN_IDENTITY="" \
-            build
+          # bash cannot export a name containing hyphens, so the hyphenated
+          # spelling cc-rs also reads is passed through env instead.
+          env "CC_aarch64-apple-darwin=$RUNNER_TEMP/clang-macos-sdk" \
+            xcodebuild \
+              -project pomme-ios/Pomme.xcodeproj \
+              -scheme Pomme \
+              -sdk iphoneos \
+              -configuration Release \
+              -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+              -destination 'generic/platform=iOS' \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY="" \
+              build
 
       - name: Package IPA
         run: |

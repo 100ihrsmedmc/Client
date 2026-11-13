@@ -29,6 +29,9 @@ const HOLD_TIME: Duration = Duration::from_millis(300);
 const STILL_SLOP: f32 = 4.0;
 /// The stick's travel, in GUI units.
 pub const STICK_RADIUS: f32 = 30.0;
+/// Extra pixels that count as a hit on a control in the layout editor, so a
+/// finger can grab a small button.
+const EDIT_GRAB_SLOP: f32 = 12.0;
 /// Mouse counts per GUI unit dragged.
 const LOOK_SCALE: f32 = 2.5;
 /// The share of the screen width, from the left, where a press is the stick.
@@ -58,6 +61,39 @@ pub enum TouchControl {
     Chat,
     Inventory,
     Pause,
+}
+
+impl TouchControl {
+    /// Every control the layout editor shows, in placement order.
+    pub const ALL: [Self; 5] = [
+        Self::Stick,
+        Self::Jump,
+        Self::Chat,
+        Self::Inventory,
+        Self::Pause,
+    ];
+
+    /// The name the layout editor shows.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stick => "Move",
+            Self::Jump => "Jump",
+            Self::Chat => "Chat",
+            Self::Inventory => "Inventory",
+            Self::Pause => "Pause",
+        }
+    }
+
+    /// The movable button this control is, or `None` for the stick.
+    pub fn button(self) -> Option<TouchButton> {
+        match self {
+            Self::Stick => None,
+            Self::Jump => Some(TouchButton::Jump),
+            Self::Chat => Some(TouchButton::Chat),
+            Self::Inventory => Some(TouchButton::Inventory),
+            Self::Pause => Some(TouchButton::Pause),
+        }
+    }
 }
 
 /// One control's saved placement. Every field is optional: an absent field
@@ -135,6 +171,50 @@ impl TouchLayoutSettings {
             .get(control as usize)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// This control's placement for editing, extending the list with defaults
+    /// so the returned entry is live.
+    fn placement_mut(&mut self, control: TouchControl) -> &mut Placement {
+        let index = control as usize;
+        if self.placements.len() <= index {
+            self.placements.resize(index + 1, Placement::default());
+        }
+        &mut self.placements[index]
+    }
+
+    /// Move a control's centre to a screen fraction, clamped to `0..1` so a bad
+    /// drag cannot put it off screen.
+    pub fn set_centre(&mut self, control: TouchControl, x: f32, y: f32) {
+        let p = self.placement_mut(control);
+        p.centre = Some((x.clamp(0.0, 1.0), y.clamp(0.0, 1.0)));
+    }
+
+    /// Set a control's size multiplier, clamped to `SIZE_MIN..=SIZE_MAX`.
+    pub fn set_size(&mut self, control: TouchControl, size: f32) {
+        self.placement_mut(control).size = Some(size.clamp(SIZE_MIN, SIZE_MAX));
+    }
+
+    /// Set a control's draw opacity, clamped to `0..=1`.
+    pub fn set_opacity(&mut self, control: TouchControl, opacity: f32) {
+        self.placement_mut(control).opacity = Some(opacity.clamp(0.0, 1.0));
+    }
+
+    /// The global size multiplier, as set (the accessor [`Self::scale`]
+    /// clamps).
+    pub fn scale_value(&self) -> f32 {
+        self.scale
+    }
+
+    /// Set the global size multiplier, clamped to `SIZE_MIN..=SIZE_MAX`.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale.clamp(SIZE_MIN, SIZE_MAX);
+    }
+
+    /// Restore every control and the global scale to the built-in layout.
+    pub fn reset_all(&mut self) {
+        self.placements.clear();
+        self.scale = 1.0;
     }
 
     /// The global scale, clamped so a bad save cannot zero the controls out.
@@ -287,6 +367,32 @@ impl TouchLayout {
         TouchButton::ALL
             .into_iter()
             .find(|&b| p.distance(self.button_centre(b)) <= self.button_radius(b))
+    }
+
+    /// A control's centre in screen pixels, whichever kind it is.
+    pub fn control_centre(&self, control: TouchControl) -> Vec2 {
+        match control.button() {
+            Some(button) => self.button_centre(button),
+            None => self.stick_home(),
+        }
+    }
+
+    /// A control's radius in pixels, whichever kind it is.
+    pub fn control_radius(&self, control: TouchControl) -> f32 {
+        match control.button() {
+            Some(button) => self.button_radius(button),
+            None => self.stick_radius(),
+        }
+    }
+
+    /// The control under a point, for the layout editor: a button takes
+    /// precedence over the stick, as in gameplay, and a small tolerance makes a
+    /// control easy to grab.
+    pub fn control_at(&self, p: Vec2) -> Option<TouchControl> {
+        TouchControl::ALL.into_iter().find(|&control| {
+            p.distance(self.control_centre(control))
+                <= self.control_radius(control) + EDIT_GRAB_SLOP
+        })
     }
 
     fn hotbar_slot_at(&self, p: Vec2) -> Option<u8> {
@@ -512,8 +618,8 @@ mod tests {
     use winit::event::TouchPhase;
 
     use super::{
-        Action, Placement, TouchButton, TouchControl, TouchControls, TouchLayout,
-        TouchLayoutSettings, TouchOutput,
+        Action, Placement, SIZE_MAX, SIZE_MIN, TouchButton, TouchControl, TouchControls,
+        TouchLayout, TouchLayoutSettings, TouchOutput,
     };
 
     /// The built-in layout, which every behavioural test uses.
@@ -876,5 +982,46 @@ mod tests {
         }];
         // 100.0 clamps to SIZE_MAX, 0.0 scale clamps to SIZE_MIN.
         assert_eq!(l.stick_radius(), 30.0 * 2.0 * 2.0 * 0.5);
+    }
+
+    #[test]
+    fn the_edit_api_sets_clamps_and_resets() {
+        let mut s = TouchLayoutSettings::default();
+
+        // A set grows the list and lands the control where it was put.
+        s.set_centre(TouchControl::Jump, 0.25, 0.75);
+        assert_eq!(s.placement(TouchControl::Jump).centre, Some((0.25, 0.75)));
+        // A set centre is clamped to the screen.
+        s.set_centre(TouchControl::Jump, -1.0, 2.0);
+        assert_eq!(s.placement(TouchControl::Jump).centre, Some((0.0, 1.0)));
+
+        // Size and opacity clamp to their ranges.
+        s.set_size(TouchControl::Stick, 9.0);
+        assert_eq!(s.placement(TouchControl::Stick).size, Some(SIZE_MAX));
+        s.set_opacity(TouchControl::Stick, -0.5);
+        assert_eq!(s.placement(TouchControl::Stick).opacity, Some(0.0));
+        s.set_scale(0.0);
+        assert_eq!(s.scale_value(), SIZE_MIN);
+
+        // Reset one control leaves the others; reset all clears everything.
+        s.reset_all();
+        assert_eq!(s, TouchLayoutSettings::default());
+    }
+
+    #[test]
+    fn an_edit_survives_a_save_and_load() {
+        let dir = std::env::temp_dir().join(format!("pomme-touch-edit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("touch_layout.json");
+
+        let mut s = TouchLayoutSettings::default();
+        s.set_centre(TouchControl::Inventory, 0.4, 0.1);
+        s.set_size(TouchControl::Inventory, 1.4);
+        s.set_opacity(TouchControl::Inventory, 0.7);
+        s.set_scale(1.2);
+        s.save(&path).unwrap();
+
+        assert_eq!(TouchLayoutSettings::load(&path), s);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

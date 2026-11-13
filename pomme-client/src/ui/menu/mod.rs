@@ -10,6 +10,7 @@ pub(crate) use options::{apply_resource_pack_options, sync_resource_packs};
 mod servers;
 mod splash;
 mod title_screen;
+mod touch_layout;
 mod worlds;
 
 use std::path::{Path, PathBuf};
@@ -642,6 +643,8 @@ enum Screen {
     OptionsCredits,
     CreditsRoll,
     DebugOptions,
+    /// The touch-control layout editor, opened from Controls.
+    OptionsTouchLayout,
 }
 
 impl Screen {
@@ -667,6 +670,7 @@ impl Screen {
             Self::OptionsCredits => Self::OptionsCredits,
             Self::CreditsRoll => Self::CreditsRoll,
             Self::DebugOptions => Self::DebugOptions,
+            Self::OptionsTouchLayout => Self::OptionsTouchLayout,
             Self::ServerList => Self::ServerList,
             Self::WorldList => Self::WorldList,
             Self::CreateWorld => Self::CreateWorld,
@@ -887,6 +891,9 @@ pub struct MainMenu {
     /// The saved touch-control layout, applied to the overlay and the input
     /// dispatch. Kept in memory so an edit takes effect without a reload.
     pub touch_layout: TouchLayoutSettings,
+    /// The touch layout editor's in-progress state (the control being dragged,
+    /// the selected control), while `Screen::OptionsTouchLayout` is open.
+    touch_editor: touch_layout::TouchEditor,
     /// The touch layout was edited, so the next settings flush writes it.
     touch_layout_dirty: bool,
     /// Set by slider drags, written by `flush_settings`.
@@ -1063,6 +1070,7 @@ impl MainMenu {
             active_slider: None,
             settings_dir: game_dir.to_path_buf(),
             touch_layout: TouchLayoutSettings::load(&touch_layout_path(game_dir)),
+            touch_editor: touch_layout::TouchEditor::default(),
             touch_layout_dirty: false,
             settings_dirty: false,
             options_saved: false,
@@ -1442,6 +1450,7 @@ impl MainMenu {
                 | Screen::OptionsCredits
                 | Screen::CreditsRoll
                 | Screen::DebugOptions
+                | Screen::OptionsTouchLayout
         )
     }
 
@@ -1782,6 +1791,13 @@ impl MainMenu {
             Screen::DebugOptions => {
                 self.build_debug_options(screen_w, screen_h, input, &text_width_fn, key_bindings)
             }
+            Screen::OptionsTouchLayout => self.build_options_touch_layout(
+                screen_w,
+                screen_h,
+                input,
+                &text_width_fn,
+                key_bindings,
+            ),
         }
     }
 

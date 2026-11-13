@@ -86,8 +86,10 @@ jobs:
       # MoltenVK as its Vulkan.
       - name: Clippy
         run: |
-          export VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)"
-          export SHADERC_LIB_DIR="$VULKAN_SDK/lib"
+          VULKAN_SDK="$(python3 tools/fetch_moltenvk.py ios)"
+          export VULKAN_SDK
+          SHADERC_LIB_DIR="$VULKAN_SDK/lib"
+          export SHADERC_LIB_DIR
           cargo clippy -p pomme-ios --target aarch64-apple-ios -- -D warnings
 
   fmt:

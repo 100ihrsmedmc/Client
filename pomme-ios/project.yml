@@ -34,6 +34,13 @@ targets:
         UISupportedInterfaceOrientations~ipad:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        # iOS prompts for local-network access before an app can reach a server
+        # on the LAN, and blocks plain http to a LAN address without this. Both
+        # are needed to join a LAN world or a self-hosted server over the
+        # network; internet servers use https and need neither.
+        NSLocalNetworkUsageDescription: Pomme joins Minecraft servers and LAN worlds on your network.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
         ITSAppUsesNonExemptEncryption: false
     settings:
       base:

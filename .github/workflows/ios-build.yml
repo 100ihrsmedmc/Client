@@ -62,6 +62,16 @@ jobs:
 
       - name: Build unsigned iOS app
         run: |
+          # aws-lc-sys builds a host-side C probe while Cargo runs from Xcode.
+          # Xcode exports the iPhoneOS SDKROOT, which is wrong for that macOS probe.
+          cat > "$RUNNER_TEMP/clang-macos-sdk" <<'EOF'
+          #!/bin/sh
+          exec xcrun --sdk macosx clang "$@"
+          EOF
+          chmod +x "$RUNNER_TEMP/clang-macos-sdk"
+          export CC_aarch64_apple_darwin="$RUNNER_TEMP/clang-macos-sdk"
+          export "CC_aarch64-apple-darwin=$RUNNER_TEMP/clang-macos-sdk"
+
           xcodebuild \
             -project pomme-ios/Pomme.xcodeproj \
             -scheme Pomme \

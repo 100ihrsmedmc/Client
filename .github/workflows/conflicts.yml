@@ -27,7 +27,7 @@ jobs:
       # `commentOnDirty`/`commentOnClean` are deliberately unset: a stack is
       # many open PRs, and one master merge would comment on every one.
       - name: Label PRs that conflict with master
-        uses: eps1lon/actions-label-merge-conflict@v3
+        uses: eps1lon/actions-label-merge-conflict@0273be72a0bbd58fcd71d0d6c02c209b50d1e5e1 # v3.1.0
         with:
           dirtyLabel: "merge conflict"
           repoToken: ${{ secrets.GITHUB_TOKEN }}
